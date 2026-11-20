@@ -1,0 +1,27 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+    if ! id ridgewarden-health >/dev/null 2>&1; then
+        adduser --system --group --home /var/lib/ridgewarden-health --no-create-home ridgewarden-health
+    fi
+    adduser ridgewarden-health ridgewarden >/dev/null
+    install -d -m 750 -o ridgewarden-health -g ridgewarden-health /var/lib/ridgewarden-health
+    # an upgrade from when apps ran as the core's user leaves files it owned
+    chown -R ridgewarden-health:ridgewarden-health /var/lib/ridgewarden-health
+    if [ ! -f /etc/ridgewarden/health.toml ]; then
+        /usr/bin/ridgewarden-health --config /etc/ridgewarden/health.toml init
+    fi
+    # its webhook URLs and passphrases are for this app only, not the other apps
+    # in the ridgewarden group
+    chown root:ridgewarden-health /etc/ridgewarden/health.toml
+    chmod 640 /etc/ridgewarden/health.toml
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload
+        # start once the core is set up; until then there's nothing to follow
+        if [ -f /etc/ridgewarden/ridgewarden.toml ]; then
+            systemctl enable ridgewarden-health >/dev/null 2>&1 || true
+            systemctl restart ridgewarden-health || true
+        fi
+    fi
+fi

@@ -1,0 +1,22 @@
+[Unit]
+Description=ridgewarden-health, a service health checker for AREDN meshes
+Documentation=https://github.com/Londopy/ridgewarden-health
+After=network-online.target ridgewarden.service
+Wants=network-online.target
+
+[Service]
+# its own user, in the core's group: it can read the core's local.token, not its station key
+User=ridgewarden-health
+Group=ridgewarden-health
+SupplementaryGroups=ridgewarden
+ExecStart=/usr/bin/ridgewarden-health --config /etc/ridgewarden/health.toml run
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/ridgewarden-health
+
+[Install]
+WantedBy=multi-user.target
