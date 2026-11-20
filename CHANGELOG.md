@@ -1,12 +1,10 @@
 # Changelog
 
-All notable changes to ridgewarden-health are listed here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html). The section for a version is
-what appears on its GitHub release page. Validated in CI by
-[patchnotes](https://github.com/Londopy/patchnotes).
+All notable changes to ridgewarden-health are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The section for a version is what appears on its GitHub release page. Validated in CI by [patchnotes](https://github.com/Londopy/patchnotes).
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-11-20
 
 ### Added
 
@@ -36,4 +34,5 @@ what appears on its GitHub release page. Validated in CI by
 - `fresh_s` must be at least two probe intervals, so jittered rounds can't make sites flap to UNKNOWN.
 - Probe results from other sites are checked before use: node names, link and text lengths, and a cap on results per event.
 
-[Unreleased]: https://github.com/Londopy/ridgewarden-health/commits/main
+[Unreleased]: https://github.com/Londopy/ridgewarden-health/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Londopy/ridgewarden-health/releases/tag/v0.1.0
