@@ -4,6 +4,18 @@ All notable changes to ridgewarden-health are listed here. The format follows [K
 
 ## [Unreleased]
 
+### Changed
+
+- The node's-eye HTTP check follows redirects the way the firmware's curl does: any 3xx, up to 50, with cookies kept, and with `.local.mesh` added to a bare host name. Only 301, 302, 303, 307 and 308 count when they end on an https address, and a redirect off the mesh now gives no verdict instead of a wrong one. Like the node, which puts the address into a shell command without quotes, it asks only for the part before the first `&` or `;`.
+- Redirect services (`/a/redirect?<address>`) are checked at the address they lead to, as the node checks them, when that address is on the mesh; off the mesh the node's verdict is left open. One that leads to an https address with a certificate curl can't verify is shown as one the node drops.
+
+### Fixed
+
+- The explanations of AREDN's own check now match the firmware source: 4.26.10.0 checks every 5 minutes, not hourly; a failing service is dropped once it has failed for 2.5 hours; the default LAN type is a routed /29, not NAT; and the node skips a host's services only when the host is in its host list and its last good reply to ping or arping is over 2.5 hours old, so blocked ping is no longer given as the usual cause. They also say that on a NAT LAN with an enabled port forward, 4.26's check hits an undeclared `dpor` and most likely errors out, so that node neither refreshes nor drops services.
+- An https MeshChat link gets the node's TCP check, which the firmware gives every https link, instead of an HTTP one.
+- The README's heartbeats command runs as the app's own user, `ridgewarden-health`.
+- The README and the example config describe what the ntfy and Discord settings take instead of showing placeholder URLs.
+
 ## [0.1.0] - 2026-11-20
 
 ### Added

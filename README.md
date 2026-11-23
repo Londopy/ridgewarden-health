@@ -15,9 +15,9 @@ It needs a [ridgewarden](https://github.com/Londopy/ridgewarden) core running on
 
 ## Features
 
-- States: **UP**, **PARTIAL** (reachable from some sites: a link problem), **DOWN**, **STALE** (advertised but never seen working), **UNPUBLISHED-BUT-ALIVE** (dropped by AREDN's hourly check but still working), and **UNKNOWN** when the data is too old to say.
-- Says why AREDN's own check would drop a service, worked out the way the node does it. The node keeps an `http` link only if it ends on a 200 or 401 within 10 seconds (redirects followed, 2 seconds to connect); any other link, `https` included, needs a TCP connection within 2 seconds or a UDP port that doesn't refuse. Each probe does the same from where it sits, so the service page can say "it answers HTTP 404, point the link at a page that returns 200", or that a Winlink port advertised as `http` can never pass, or that a host answers but probably drops ping.
-- Checks that know the protocol. Links ending in `/meshchat` are asked through MeshChat's own API (`/cgi-bin/meshchat?action=config`, which answers with its version and zone, and `action=sync_status` for when it last synced with another MeshChat node). Ports 8772 (RMS Relay, Winlink telnet) and 8774 (Pat's telnet) get a Winlink check: connect and wait for the `Callsign :` prompt those servers send first. It never sends anything, so it never logs in.
+- States: **UP**, **PARTIAL** (reachable from some sites: a link problem), **DOWN**, **STALE** (advertised but never seen working), **UNPUBLISHED-BUT-ALIVE** (dropped by AREDN's own check but still working), and **UNKNOWN** when the data is too old to say.
+- Says why AREDN's own check would drop a service, worked out the way the node does it in its firmware (`files/usr/share/ucode/aredn/services.uc`, AREDN 4.26.10.0). The node checks its services every 5 minutes and stops listing one that has failed for 2.5 hours. An `http` link passes if it ends on a 200 or 401 within 10 seconds, with 2 seconds to connect and redirects followed the way the node's curl follows them (cookies kept, a redirect to an https address taken on trust). A Redirect service (`/a/redirect?<address>`) is checked at the address it leads to. The node puts the address into a shell command without quotes, so it only asks for the part before the first `&` or `;`, and so does this check. Any other link, `https` included, needs a TCP connection within 2 seconds or a UDP port that doesn't refuse. Each probe does the same from where it sits, so the service page can say "it answers HTTP 404, point the link at a page that returns 200", or that a Winlink port advertised as `http` can never pass, or that a Redirect to a self-signed https address always fails.
+- Checks that know the protocol. Links ending in `/meshchat` are asked through MeshChat's own API (`/cgi-bin/meshchat?action=config`, which answers with its version and zone, and `action=sync_status` for when it last synced with another MeshChat node). Ports 8772 (Winlink's telnet port) and 8774 (Pat's telnet listener) get a Winlink check: connect and wait for the `Callsign :` prompt a Winlink telnet server sends first. It never sends anything, so it never logs in.
 - Push heartbeats for things that can't be probed: a backup job, a battery monitor, a station on a timer. Each one POSTs to its own secret URL on one site; that site decides whether it's on time and logs the verdict as a signed event, so every site sees it.
 - Thresholds: a site calls a service down after 3 failed checks in a row and up again after 2 good ones, so one dropped packet doesn't page anyone.
 - If every check from a site fails, that site is probably cut off. Its results are left out and the page says so, instead of calling the whole mesh down.
@@ -88,7 +88,7 @@ expect_status = [200]
 keyword = "Main Page"
 ```
 
-Without an override the check comes from the link: `/meshchat` links get the MeshChat check, ports 8772 and 8774 the Winlink check, other `http` and `https` links an HTTP request, and anything else with a port a TCP connection.
+Without an override the check comes from the link: `/meshchat` links get the MeshChat check, ports 8772 and 8774 the Winlink check, other `http` and `https` links an HTTP request, and anything else with a port a TCP connection. A Redirect service is checked at the address it leads to when that's on the mesh.
 
 With `sites_per_service`, each site still probes the services on its own node, since it's one LAN hop from them. A service probed from fewer sites can still show PARTIAL, but only among the sites probing it.
 
@@ -98,9 +98,8 @@ Set alerts up on one site only, or every site sends the same one.
 
 ```toml
 [alerts]
-ntfy = "https://ntfy.sh/your-mesh-topic"      # or a self-hosted ntfy on the mesh
-discord = "https://discord.com/api/webhooks/..."
-webhooks = ["http://10.1.2.3:9000/hook"]       # JSON: app, key, state, severity, title, text, ack_url
+ntfy = "http://10.1.2.3/mesh-alerts"            # a topic's URL; see below
+webhooks = ["http://10.1.2.3:9000/hook"]        # JSON: app, key, state, severity, title, text, ack_url
 public_url = "http://n0call-pi.local.mesh:8791" # for acknowledge links and push URLs
 quiet_hours = "22-6"                            # UTC; only critical alerts go out
 repeat_hours = 4                                # until someone acknowledges
@@ -121,6 +120,8 @@ matches = "camera"
 reason = "owner is replacing it"
 review = "2027-01-31"                           # alerts come back after this day
 ```
+
+In these examples 10.1.2.3 stands for another box on your mesh and `n0call-pi` for this one. `ntfy` takes the URL of a topic: one on your own ntfy server, like the one above, or on `https://ntfy.sh/` with a topic name nobody would guess, since anyone who knows a topic's name can read it. `discord` takes the URL Discord gives a webhook (Server Settings, Integrations, Webhooks, Copy Webhook URL), which starts with `https://discord.com/api/webhooks/`. Treat it like a password: anyone who has it can post to that channel.
 
 Down services and missed heartbeats are critical, partly reachable ones are warnings, and a working service that AREDN dropped from the list is informational. Each alert goes out when it starts, again every `repeat_hours` until someone acknowledges it, and once when it clears. The acknowledge link opens a page with a button, so a chat app's link preview can't acknowledge it for you.
 
@@ -166,7 +167,7 @@ grace_s = 300             # how late it may be; 60 by default
 Each heartbeat gets its own secret URL. The secret comes from this app's database, not the config, so print the URLs as the service's user:
 
 ```sh
-sudo -u ridgewarden ridgewarden-health --config /etc/ridgewarden/health.toml heartbeats
+sudo -u ridgewarden-health ridgewarden-health --config /etc/ridgewarden/health.toml heartbeats
 ```
 
 Then have the job POST to it when it runs, adding `?status=down&msg=...` to report a problem:
@@ -182,10 +183,13 @@ The app believes only events from stations the core trusts: its own key, plus th
 
 ## Limits
 
-- The AREDN node's verdict is worked out from where this box sits, not from the node: the node checks from its own LAN, through its own port forwards in NAT mode, and in DMZ mode only after pinging and arping the host, none of which this app can see. When a working service gets dropped and our check passes, the page says which of those to look at.
-- AREDN 4.26's on-node service watch would let the node report changes as they happen, but it needs a package installed on each node. This app polls through the core instead.
+- Not yet run on a real AREDN mesh. The checks are tested against small local servers in the test suite and against the ridgewarden simulator's simulated nodes and services. The AREDN rules come from reading the firmware source (4.26.10.0), not from watching a real node drop a service. The spec's first-week count of stale and wrongly unpublished services needs a real mesh.
+- The AREDN node's verdict is worked out from where this box sits, not from the node. The node checks from its own LAN, through its port forwards on a NAT LAN; on the other LAN types it skips the services of a host in its host list whose last good reply to ping or arping is over 2.5 hours old. This app can't see any of that. When a working service gets dropped and our check passes, the page says which of those to look at.
+- AREDN 4.26 (4.26.1.0 to 4.26.10.0) has a typo in its port-forward lookup (`dpor` for `dport` in `services.uc`). On a NAT LAN with an enabled port forward, the check hits the undeclared `dpor` and most likely errors out, since the firmware loads `services.uc` as a module and ucode compiles modules with strict declarations; that node then neither refreshes nor drops services. This comes from reading the source, not from a real node. The page says so; the fix has to come from the AREDN developers.
+- The page uses 4.26.10.0's rules. Older firmware checks the same way with small differences: hourly rather than every 5 minutes before 4.26.10.0, and before 4.26.7.0 it gives up on an answer after 5 seconds of silence rather than 10. On 4.26.10.0 a node whose LAN DHCP server is off doesn't check its services at all.
+- AREDN 4.26.7.0 added an on-node API to watch for service changes (`watch()` in its `aredn.services` module, which waits on inotify for arednlink's files). Using it means running code on every node, so this app reads the service list from the core's polls instead: every 5 minutes by default, as often as the node's own check runs.
+- The spec asks for a real Winlink (CMS) handshake. The check stops at the server's `Callsign :` prompt on purpose: the next step is logging in with a callsign and password, every round from every site, which would turn a check into a stream of Winlink sessions on someone else's gateway. The cost is that it can't tell a gateway that has lost its CMS link from a working one.
 - Whether an owner heard about an outage from an alert before a user reported it can't be measured here: the app doesn't know when people noticed.
-- The Winlink check proves a Winlink server is listening, not that it can reach a CMS or pass mail; that would mean logging in.
 - The Postfix drop-in was checked with systemd on a test box (the shipped unit blocks the spool, the drop-in allows it), not with Postfix itself installed.
 
 ## Building from source
