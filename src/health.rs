@@ -300,7 +300,7 @@ fn judge(
         (
             Class::UnpublishedAlive,
             up.iter().map(|v| v.run_start).min(),
-            "Missing from the mesh service list, but still answering. AREDN's hourly \
+            "Missing from the mesh service list, but still answering. AREDN's own \
              reachability check may have unpublished it by mistake."
                 .into(),
         )
@@ -635,44 +635,57 @@ pub fn aredn_text(c: &NodeCheck) -> String {
             "It redirects to an https address, which AREDN's check takes on trust.".into()
         }
         "http-status" if (300..400).contains(&code) => format!(
-            "It ends on a redirect (HTTP {code}) that doesn't lead to a page. AREDN follows \
-             redirects and keeps the service only if they end on a page that returns 200 or \
-             401, or on an https address."
+            "It ends on a redirect (HTTP {code}) that doesn't lead to a page, or redirects more \
+             than 50 times. AREDN follows redirects and keeps the service only if they end on a \
+             page that returns 200 or 401, or on an https address, so the node stops listing it \
+             once it has failed for 2.5 hours."
         ),
         "http-status" => format!(
             "It answers HTTP {code}, but AREDN's check only accepts 200 or 401, so the node \
-             drops it from the mesh list within 2.5 hours even though a server is there. Point \
-             the advertised link at a page that returns 200, such as the app's front page."
+             stops listing it once it has failed for 2.5 hours, even though a server is there. \
+             Point the advertised link at a page that returns 200, such as the app's front page."
         ),
         "http-slow" => "It takes longer than the 10 s AREDN's check waits for an answer, so the \
-                        node drops it from the mesh list."
+                        node stops listing it once it has failed for 2.5 hours."
             .into(),
-        "http-unreachable" => "It takes more than the 2 s AREDN's check allows to accept a \
-                               connection, so the node may drop it from the mesh list."
+        "http-unreachable" => "It doesn't take a connection within the 2 s AREDN's check allows. \
+                               If the node can't connect either, it stops listing the service \
+                               once it has failed for 2.5 hours."
+            .into(),
+        "https-untrusted" => "It leads to an https address whose certificate can't be verified \
+                              (a self-signed one, most likely). AREDN's check fetches a Redirect \
+                              service's address itself with curl, which refuses that certificate, \
+                              so the node stops listing it once it has failed for 2.5 hours. \
+                              Advertise the service as https on its own port instead: the node \
+                              only checks that the port takes a connection."
             .into(),
         "not-http" => "Its link is http, so AREDN's check sends it an HTTP request, but the port \
-                       doesn't speak HTTP (a Winlink port sends a login prompt instead) and the \
-                       node drops it. In the node's service settings, turn the link off for it or \
-                       give it a protocol other than http."
+                       doesn't speak HTTP (a Winlink port sends a login prompt instead), so the \
+                       node stops listing it once it has failed for 2.5 hours. In the node's \
+                       service settings, turn the link off for it or give it a protocol other \
+                       than http."
             .into(),
         "tcp" => "It takes a TCP connection within 2 s, which AREDN's check accepts.".into(),
         "udp" => "It takes no TCP connection, but its UDP port doesn't refuse, which AREDN's \
                   check accepts."
             .into(),
         "refused" => "Its port takes no TCP connection and refuses UDP, so AREDN's check fails \
-                      and the node drops it. Check the port in the advert, and any firewall on \
-                      the host."
+                      and the node stops listing it once it has failed for 2.5 hours. Check the \
+                      port in the advert, and any firewall on the host."
             .into(),
         _ => String::new(),
     }
 }
 
 /// What AREDN's own check on the node makes of this service, from our sites' results.
-/// The node keeps a service listed for 2.5 hours after it last passed. HTTP links pass on
-/// a 200 or 401 within 10 s, redirects followed, and 2 s to connect; other links (https
-/// included) pass on a TCP connection within 2 s, or a UDP send that isn't refused. In NAT
-/// mode the node checks through its own port forwards; in DMZ mode it skips the services
-/// of a host that stops answering ping and arping, so they drop off.
+/// The node checks every 5 minutes (hourly before firmware 4.26.10.0) and stops listing a
+/// service that has failed for 2.5 hours. HTTP links pass on a 200 or 401 within 10 s,
+/// redirects followed, and 2 s to connect; other links (https included) pass on a TCP
+/// connection within 2 s, or a UDP send that isn't refused. Behind a NAT port forward the
+/// node checks the forward's target; on any other LAN type it skips the services of a host
+/// in its host list whose last good ping or arping reply is over 2.5 hours old. From
+/// files/usr/share/ucode/aredn/services.uc and files/usr/local/mgr/lan_monitor.uc in the
+/// AREDN firmware.
 pub fn aredn_view(v: &ServiceView) -> Option<String> {
     if v.is_heartbeat() {
         return None;
@@ -693,12 +706,18 @@ pub fn aredn_view(v: &ServiceView) -> Option<String> {
         Some(a) => format!("{} ", aredn_text(a)),
         None => "It answers from here. ".into(),
     };
+    // services.uc reads `dpor` while mapping forwards; the manager imports it statically, and
+    // ucode compiles static imports with strict declarations, so that most likely throws
     Some(format!(
-        "{first}So the node probably couldn't reach it when it checked. In NAT mode (the \
-         default) the node checks through its own port forwards, so check that the forward for \
-         this port points at the right address. In DMZ mode the node first pings the host, then \
-         tries arping, and skips the services of a host that answers neither: a firewall that \
-         drops ping (Windows does by default) is the usual cause."
+        "{first}So the node probably couldn't reach it when it last checked. It checks every 5 \
+         minutes (hourly before firmware 4.26.10.0) and lists the service again once it passes. \
+         Behind a NAT port forward, check that the forward points at the right address. On a \
+         NAT LAN with an enabled port forward, AREDN 4.26's check hits an undeclared variable \
+         (dpor, a typo for dport) and most likely errors out, so that node neither refreshes \
+         nor drops services. On the other LAN types (the default) the node skips the services \
+         of a host in its host list whose last good reply to ping or arping is over 2.5 hours \
+         old, so check that the host still answers on the node's LAN at the address the node \
+         has for it."
     ))
 }
 
@@ -1007,6 +1026,7 @@ mod tests {
                 ("Wiki", "http://wiki/"),
                 ("Ok", "http://ok/"),
                 ("Gw", "http://gw:8772/"),
+                ("Nas", "http://node/a/redirect?https://nas/"),
             ],
         );
         report(
@@ -1016,6 +1036,7 @@ mod tests {
                 checked("http://wiki/", true, json!({"pass": false, "code": "http-status", "status": 404})),
                 checked("http://ok/", true, json!({"pass": true, "code": "http-ok", "status": 200})),
                 checked("http://gw:8772/", true, json!({"pass": true, "code": "not-http"})),
+                checked("http://node/a/redirect?https://nas/", true, json!({"pass": true, "code": "https-untrusted"})),
             ]}),
             NOW - MIN,
         );
@@ -1028,11 +1049,13 @@ mod tests {
         // the pass flag comes from our own table of codes, not from whoever sent it
         let why = aredn_view(get("Gw")).unwrap();
         assert!(why.contains("doesn't speak HTTP"), "{why}");
+        let why = aredn_view(get("Nas")).unwrap();
+        assert!(why.contains("certificate"), "{why}");
         assert_eq!(get("Wiki").vantages[0].check, "http");
     }
 
     #[test]
-    fn a_dropped_service_that_passes_the_check_points_at_ping() {
+    fn a_dropped_service_that_passes_the_check_points_at_what_the_node_sees() {
         let mut l = log();
         advertise(&mut l, NOW - 3 * MIN, &[("Cam", "http://cam/")]);
         advertise(&mut l, NOW - MIN, &[]);
@@ -1047,7 +1070,36 @@ mod tests {
         let views = classify(&l.conn, NOW, &NOW_RULES).unwrap();
         assert_eq!(views[0].class, Class::UnpublishedAlive);
         let why = aredn_view(&views[0]).unwrap();
-        assert!(why.contains("ping"), "{why}");
+        // only a listed host that has stopped answering for 2.5 hours gets its services skipped
+        assert!(
+            why.contains("ping or arping is over 2.5 hours old"),
+            "{why}"
+        );
+        // 4.26's undeclared dpor most likely stops the check rather than dropping anything
+        assert!(
+            why.contains("dpor") && why.contains("neither refreshes nor drops"),
+            "{why}"
+        );
+        assert!(!why.contains("fail behind a forward"), "{why}");
+        assert!(why.contains("every 5 minutes"), "{why}");
+    }
+
+    #[test]
+    fn every_failing_verdict_says_when_the_node_drops_it() {
+        for status in [302, 404] {
+            for (code, _) in AREDN_CODES.iter().filter(|(_, pass)| !pass) {
+                let c = NodeCheck {
+                    pass: false,
+                    code: code.to_string(),
+                    status: Some(status),
+                };
+                let text = aredn_text(&c);
+                assert!(
+                    text.contains("once it has failed for 2.5 hours"),
+                    "{code} {status}: {text}"
+                );
+            }
+        }
     }
 
     #[test]

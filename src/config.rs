@@ -377,8 +377,11 @@ sites_per_service = 5
 
 # Alerts: set these up on one site only, or every site sends the same alert.
 [alerts]
+# ntfy takes a topic's URL: one on your own ntfy server, like this one on the mesh, or on
+# https://ntfy.sh/ with a topic name nobody would guess, since anyone who knows it can read it.
 # ntfy = "http://10.1.2.3/mesh-alerts"
-# discord = "https://discord.com/api/webhooks/..."
+# discord takes the URL Discord gives a webhook (Server Settings, Integrations, Webhooks,
+# Copy Webhook URL). It starts with https://discord.com/api/webhooks/.
 # webhooks = []
 # public_url = "http://n0call-pi.local.mesh:8791"
 # quiet_hours = "22-6"

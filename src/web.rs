@@ -264,7 +264,8 @@ async fn services_page(State(app): State<Arc<App>>) -> Result<Html<String>, Fail
             }
             if aredn_view(s).is_some_and(|_| s.class != Class::UnpublishedAlive) {
                 why.push_str(
-                    "<br><span class=small>AREDN may drop it from the mesh list; see details.</span>",
+                    "<br><span class=small>AREDN's check would fail on it, so the node stops \
+                     listing it once it has failed for 2.5 hours; see details.</span>",
                 );
             }
             let up = uptime(&app.db(), &s.svc.link, now)?;
@@ -312,7 +313,11 @@ fn node_cell(a: Option<&NodeCheck>) -> String {
             "{} <span class=\"mute small\">{}</span>",
             pill(
                 if a.pass { Color::Green } else { Color::Red },
-                if a.pass { "keeps it" } else { "drops it" }
+                if a.pass {
+                    "keeps it"
+                } else {
+                    "drops it after 2.5 h"
+                }
             ),
             esc(&aredn_text(a))
         ),

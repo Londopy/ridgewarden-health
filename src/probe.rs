@@ -1,7 +1,7 @@
 //! Service probing: every site probes the services the mesh advertises, from where it
 //! sits, and logs the results through its core as one signed `svc.probe` event per round.
-//! Each result also says whether the AREDN node's own hourly check would pass, worked out
-//! the way the node does it.
+//! Each result also says whether the AREDN node's own reachability check would pass,
+//! worked out the way the node does it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, SocketAddr};
@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
+use reqwest::Url;
+use reqwest::header::{COOKIE, HeaderMap, LOCATION, SET_COOKIE};
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -24,7 +26,7 @@ use crate::app::{App, short_err};
 use crate::config::{ProbeCfg, ProbeOverride};
 
 /// Services advertised at any point in this window keep being probed, which is how
-/// "unpublished but still alive" gets noticed after AREDN's hourly check drops one.
+/// "unpublished but still alive" gets noticed after AREDN's own check drops one.
 pub const REMEMBER_MS: i64 = 7 * 86_400_000;
 
 const CONCURRENCY: usize = 8;
@@ -34,6 +36,14 @@ const KEYWORD_BYTES: usize = 256 * 1024;
 
 /// How long a Winlink server gets to send its login prompt once connected.
 const PROMPT_WAIT: Duration = Duration::from_secs(5);
+
+/// The redirects the node's check accepts when they end on an https address
+/// (files/usr/share/ucode/aredn/services.uc in the AREDN firmware). Its curl follows any
+/// 3xx with a Location.
+const HTTPS_REDIRECTS: [u16; 5] = [301, 302, 303, 307, 308];
+
+/// curl's default --max-redirs, which the node's check doesn't change.
+const MAX_REDIRECTS: usize = 50;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -75,6 +85,7 @@ pub const AREDN_CODES: &[(&str, bool)] = &[
     ("http-status", false),
     ("http-slow", false),
     ("http-unreachable", false),
+    ("https-untrusted", false),
     ("not-http", false),
     ("tcp", true),
     ("udp", true),
@@ -102,8 +113,8 @@ pub struct ProbeResult {
     pub aredn: Option<Aredn>,
 }
 
-/// AREDN lists a service with no link as proto://host:0/, and keeps it without checking:
-/// there is nothing to connect to, so it is left out here too.
+/// The node keeps a service whose link is turned off as proto://host:0/ and never checks
+/// it (services.uc); sysinfo shows it with an empty link. Nothing to connect to either way.
 pub fn linkless(link: &str) -> bool {
     host_port(link).is_some_and(|h| h.2 == Some(0))
 }
@@ -254,6 +265,60 @@ fn scheme(link: &str) -> String {
         .map_or(String::new(), |(s, _)| s.to_ascii_lowercase())
 }
 
+/// The address a Redirect service (the node's /a/redirect?<address>) sends people to.
+fn redirect_target(link: &str) -> Option<&str> {
+    let rest = link.split_once("://")?.1;
+    rest[rest.find('/')?..].strip_prefix("/a/redirect?")
+}
+
+/// What the node's check hands curl for an http(s) link (services.uc): a Redirect service's
+/// target, else the link. It goes into a shell command unquoted, so sh ends it at the first
+/// & or ;. Other shell characters ($, |, quotes, spaces) mangle it too; those aren't copied.
+fn node_target(link: &str) -> &str {
+    let t = redirect_target(link).unwrap_or(link);
+    t.split(['&', ';']).next().unwrap_or(t)
+}
+
+/// The address the node's check fetches: `node_target`, with .local.mesh added to a bare
+/// host unless it's a Redirect service's target, which is fetched as it stands.
+pub fn node_url(link: &str) -> Option<Url> {
+    let mut url = Url::parse(node_target(link))
+        .ok()
+        .filter(|u| matches!(u.scheme(), "http" | "https"))?;
+    let bare = url
+        .host_str()
+        .filter(|h| redirect_target(link).is_none() && !h.contains('.'))
+        .map(|h| format!("{h}.local.mesh"));
+    if let Some(h) = bare {
+        url.set_host(Some(&h)).ok()?;
+    }
+    Some(url)
+}
+
+/// curl's cookie jar, cut down: name=value pairs, sent back only to the host that set them.
+/// Unlike curl it ignores Path, Domain, Secure and expiry, so Max-Age=0 doesn't delete one.
+type Jar = BTreeMap<(String, String), String>;
+
+fn keep_cookies(jar: &mut Jar, host: &str, headers: &HeaderMap) {
+    for c in headers
+        .get_all(SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+    {
+        if let Some((name, value)) = c.split(';').next().and_then(|p| p.split_once('=')) {
+            jar.insert((host.into(), name.trim().into()), value.trim().into());
+        }
+    }
+}
+
+fn cookies_for(jar: &Jar, host: &str) -> String {
+    jar.iter()
+        .filter(|((h, _), _)| h == host)
+        .map(|((_, n), v)| format!("{n}={v}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 pub fn override_for<'a>(s: &Service, cfg: &'a ProbeCfg) -> Option<&'a ProbeOverride> {
     let name = s.name.to_ascii_lowercase();
     cfg.overrides
@@ -261,7 +326,8 @@ pub fn override_for<'a>(s: &Service, cfg: &'a ProbeCfg) -> Option<&'a ProbeOverr
         .find(|o| name.contains(&o.name_contains.to_ascii_lowercase()))
 }
 
-/// RMS Relay and Winlink's own telnet listen on 8772, Pat's telnet on 8774.
+/// 8772 is Winlink's telnet port (wl2k-go transport/telnet/dial.go), 8774 Pat's telnet
+/// listener (pat cfg/config.go).
 fn winlink_port(p: u16) -> bool {
     p == 8772 || p == 8774
 }
@@ -388,7 +454,8 @@ async fn udp_refused(host: &str, port: u16, cfg: &ProbeCfg) -> Result<bool> {
     if let Err(e) = sock.send(&[]).await {
         return if refused(&e) { Ok(true) } else { Err(e.into()) };
     }
-    // the node waits a moment on its own LAN; across the mesh a refusal takes longer
+    // the node waits 1 ms for a refusal on its own LAN (services.uc); across the mesh one
+    // takes longer
     let mut buf = [0u8; 64];
     match tokio::time::timeout(Duration::from_secs(1), sock.recv(&mut buf)).await {
         Ok(Err(e)) if refused(&e) => Ok(true),
@@ -407,9 +474,10 @@ struct Connected {
 
 type Outcome = (bool, Option<f64>, Option<u16>, String, Option<Aredn>);
 
-/// Makes the probes. Two HTTP clients: one for our own verdict (no redirects followed, so
-/// a redirect can't aim our probes somewhere else), and one that behaves like the node's
-/// curl (2 s to connect, 10 s in all, redirects followed while they stay on the mesh).
+/// Makes the probes. Two HTTP clients, neither following redirects by itself: one for our
+/// own verdict (so a redirect can't aim our probes somewhere else), and one that behaves
+/// like the node's curl (2 s to connect, certificates checked), which `node_http` walks
+/// through redirects the way curl does.
 pub struct Prober {
     pub cfg: ProbeCfg,
     http: reqwest::Client,
@@ -419,15 +487,6 @@ pub struct Prober {
 impl Prober {
     pub fn new(cfg: &ProbeCfg) -> Result<Self> {
         let agent = concat!("ridgewarden-health/", env!("CARGO_PKG_VERSION"));
-        let allow = cfg.allow_hosts.clone();
-        let follow = reqwest::redirect::Policy::custom(move |a| {
-            let on_mesh = a.url().host_str().is_some_and(|h| allowed_host(h, &allow));
-            if a.previous().len() >= 10 || a.url().scheme() != "http" || !on_mesh {
-                a.stop()
-            } else {
-                a.follow()
-            }
-        });
         let dns = Arc::new(MeshDns(cfg.allow_hosts.clone()));
         // mesh https services mostly have self-signed certificates; a probe asks whether
         // the service answers, not who it is
@@ -443,7 +502,7 @@ impl Prober {
             .dns_resolver(dns)
             .connect_timeout(Duration::from_secs(2))
             .timeout(Duration::from_secs(10))
-            .redirect(follow)
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(agent);
         if let Some(ip) = cfg.source_ip {
             pb = pb.local_address(ip);
@@ -491,10 +550,23 @@ impl Prober {
         }
     }
 
+    /// Where our own HTTP check goes: the link, or for a Redirect service the address it
+    /// leads to while that's on the mesh, so it's judged by the page people reach.
+    fn own_url<'a>(&self, link: &'a str) -> &'a str {
+        redirect_target(link)
+            .filter(|t| {
+                host_port(t).is_some_and(|(s, h, _)| {
+                    (s == "http" || s == "https") && allowed_host(&h, &self.cfg.allow_hosts)
+                })
+            })
+            .unwrap_or(link)
+    }
+
     async fn http_check(&self, s: &Service) -> Outcome {
         let start = Instant::now();
         let check = override_for(s, &self.cfg);
-        let r = match self.http.get(&s.link).send().await {
+        let url = self.own_url(&s.link);
+        let r = match self.http.get(url).send().await {
             Ok(r) => r,
             Err(e) => {
                 let a = self.node_any(s).await;
@@ -509,10 +581,12 @@ impl Prober {
             None => None,
         };
         let (ok, detail) = http_verdict(code, body.as_deref(), check);
+        // the node's curl starts where we did, give or take .local.mesh on a bare host
+        let same = scheme(url) == "http" && node_target(&s.link) == url;
         let a = match scheme(&s.link).as_str() {
-            // the node follows redirects; we only ask again when there is one to follow
-            "http" if redirect => self.node_http(&s.link).await,
-            "http" => Some(node_status(code, ms)),
+            // our answer is the node's too, unless its curl would go elsewhere or further
+            "http" if same && !redirect => Some(node_status(code, ms)),
+            "http" => self.node_http(&s.link).await,
             // https links get the node's TCP check, which a quick answer has already passed
             _ if ms <= 2000.0 => Some(aredn("tcp", None)),
             _ => self.node_any(s).await,
@@ -521,14 +595,15 @@ impl Prober {
     }
 
     /// MeshChat's `config` action answers with its version, node and zone; `sync_status`
-    /// says when it last pulled messages from each other MeshChat node.
+    /// says when it last pulled messages from each other MeshChat node (the `meshchat` CGI
+    /// script in hickey/meshchat).
     async fn meshchat(&self, s: &Service, base: &str) -> Outcome {
         let start = Instant::now();
         let api = format!("{base}/cgi-bin/meshchat");
         let r = match self.http.get(format!("{api}?action=config")).send().await {
             Ok(r) => r,
             Err(e) => {
-                let a = self.node_http(&s.link).await;
+                let a = self.node_any(s).await;
                 return (false, None, None, short_err(&e.into()), a);
             }
         };
@@ -557,7 +632,7 @@ impl Prober {
                 format!("HTTP {code}, but no MeshChat API at /cgi-bin/meshchat"),
             ),
         };
-        let a = self.node_http(&s.link).await;
+        let a = self.node_any(s).await;
         (ok, Some(ms), Some(code), detail, a)
     }
 
@@ -679,8 +754,9 @@ impl Prober {
         }
     }
 
-    /// The node's check for a non-HTTP link: a TCP connection within 2 s, else a UDP send
-    /// that isn't refused. Our own connection attempt settles the TCP half.
+    /// The node's check for a non-HTTP link (services.uc): a TCP connection within 2 s,
+    /// else an empty UDP send that isn't refused. Our own connection attempt settles the
+    /// TCP half.
     async fn node_view(&self, s: &Service, host: &str, port: u16, c: &Connected) -> Option<Aredn> {
         match scheme(&s.link).as_str() {
             // the request a Winlink server would read as a callsign is never sent
@@ -710,25 +786,73 @@ impl Prober {
         self.node_view(s, &host, port, &c).await
     }
 
-    /// The node's HTTP check: like its `curl --location --connect-timeout 2 --max-time 10`.
+    /// The node's HTTP check, as services.uc runs it: `curl --location --cookie-jar
+    /// --connect-timeout 2 --max-time 10`, which passes on a 200 or 401.
     async fn node_http(&self, link: &str) -> Option<Aredn> {
+        let url = node_url(link)?;
+        tokio::time::timeout(Duration::from_secs(10), self.follow(url))
+            .await
+            .unwrap_or(Some(aredn("http-slow", None)))
+    }
+
+    async fn follow(&self, mut url: Url) -> Option<Aredn> {
         let start = Instant::now();
-        match self.like_node.get(link).send().await {
-            Ok(r) => {
-                let code = r.status().as_u16();
-                let to_https = r
-                    .headers()
-                    .get(reqwest::header::LOCATION)
-                    .and_then(|l| l.to_str().ok())
-                    .is_some_and(|l| l.to_ascii_lowercase().starts_with("https:"));
-                if r.status().is_redirection() && to_https {
+        let mut jar = Jar::new();
+        let mut hops = 0;
+        loop {
+            // the node would follow a redirect anywhere; this box stays on the mesh
+            let host = url
+                .host_str()
+                .filter(|h| allowed_host(h, &self.cfg.allow_hosts))?
+                .to_string();
+            let mut req = self.like_node.get(url.clone());
+            let sent = cookies_for(&jar, &host);
+            if !sent.is_empty() {
+                req = req.header(COOKIE, sent);
+            }
+            let r = match req.send().await {
+                Ok(r) => r,
+                Err(e) if e.is_connect() => return Some(self.no_connection(&url, &host).await),
+                Err(e) if e.is_timeout() => return Some(aredn("http-slow", None)),
+                Err(_) => return Some(aredn("not-http", None)),
+            };
+            let code = r.status().as_u16();
+            keep_cookies(&mut jar, &host, r.headers());
+            let next = r
+                .headers()
+                .get(LOCATION)
+                .and_then(|l| l.to_str().ok())
+                .and_then(|l| url.join(l).ok())
+                .filter(|_| r.status().is_redirection());
+            match next {
+                // services.uc takes a redirect to https on trust: its curl can't check a
+                // self-signed certificate
+                Some(n)
+                    if n.scheme() == "https"
+                        && HTTPS_REDIRECTS.contains(&code)
+                        && hops < MAX_REDIRECTS =>
+                {
                     return Some(aredn("https-redirect", Some(code)));
                 }
-                Some(node_status(code, ms_since(start)))
+                Some(n) if n.scheme() == "http" && hops < MAX_REDIRECTS => {
+                    url = n;
+                    hops += 1;
+                }
+                _ => return Some(node_status(code, ms_since(start))),
             }
-            Err(e) if e.is_connect() => Some(aredn("http-unreachable", None)),
-            Err(e) if e.is_timeout() => Some(aredn("http-slow", None)),
-            Err(_) => Some(aredn("not-http", None)),
+        }
+    }
+
+    /// Why the node's kind of request got no answer: nothing took the connection, or it
+    /// was https and the TLS handshake failed. `https-untrusted` stands for any TLS failure
+    /// (an unverifiable certificate, a protocol curl won't speak, a port that isn't TLS),
+    /// since each one stops curl the same way.
+    async fn no_connection(&self, url: &Url, host: &str) -> Aredn {
+        let port = url.port_or_known_default().unwrap_or(443);
+        if url.scheme() == "https" && self.connect(host, port, 2).await.ok {
+            aredn("https-untrusted", None)
+        } else {
+            aredn("http-unreachable", None)
         }
     }
 }
@@ -886,8 +1010,8 @@ mod tests {
         (port, rx)
     }
 
-    /// An HTTP server on loopback answering each request with `respond(path)`.
-    fn http_server(respond: fn(&str) -> String) -> u16 {
+    /// An HTTP server on loopback answering each request with `respond(path, request)`.
+    fn http_server(respond: fn(&str, &str) -> String) -> u16 {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
         std::thread::spawn(move || {
@@ -896,7 +1020,7 @@ mod tests {
                 let n = s.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]).to_string();
                 let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
-                let _ = s.write_all(respond(&path).as_bytes());
+                let _ = s.write_all(respond(&path, &req).as_bytes());
             }
         });
         port
@@ -1138,7 +1262,7 @@ mod tests {
     #[tokio::test]
     async fn meshchat_check_asks_its_api() {
         let p = local();
-        let port = http_server(|path| {
+        let port = http_server(|path, _| {
             if path.contains("action=config") {
                 reply(
                     "200 OK",
@@ -1165,7 +1289,7 @@ mod tests {
         );
         assert_eq!(r.aredn, Some(aredn("http-ok", Some(200))));
         // a web server that isn't MeshChat
-        let port = http_server(|_| reply("200 OK", "", "It works!"));
+        let port = http_server(|_, _| reply("200 OK", "", "It works!"));
         let s = svc("Chat", &format!("http://127.0.0.1:{port}/meshchat"));
         let r = p.probe(&s, mode_for(&s, &p.cfg)).await;
         assert!(!r.ok);
@@ -1173,40 +1297,270 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_node_view_follows_redirects_like_the_node() {
+    async fn an_https_meshchat_gets_the_nodes_tcp_check() {
         let p = local();
-        let port = http_server(|path| match path {
+        // not TLS, so our MeshChat check fails, but the port takes a connection
+        let (port, _) = server(b"not a TLS server\r\n");
+        let s = svc("Chat", &format!("https://127.0.0.1:{port}/meshchat"));
+        assert!(matches!(mode_for(&s, &p.cfg), Mode::MeshChat(_)));
+        let r = p.probe(&s, mode_for(&s, &p.cfg)).await;
+        assert!(!r.ok, "{}", r.detail);
+        assert_eq!(
+            r.aredn,
+            Some(aredn("tcp", None)),
+            "the node checks every https link with a TCP connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_node_view_follows_redirects_like_the_nodes_curl() {
+        let p = local();
+        let port = http_server(|path, req| match path {
             "/" => reply("302 Found", "Location: /wiki/\r\n", ""),
             "/wiki/" => reply("404 Not Found", "", "nope"),
             "/secure" => reply("301 Moved", "Location: https://10.9.9.9/\r\n", ""),
+            "/choices" => reply("300 Choices", "Location: https://10.9.9.9/\r\n", ""),
             "/moved" => reply("302 Found", "Location: /broken\r\n", ""),
             "/broken" => reply("500 Oops", "", ""),
             "/away" => reply("302 Found", "Location: http://192.168.1.1/\r\n", ""),
+            "/login" => reply(
+                "302 Found",
+                "Set-Cookie: session=abc; Path=/; HttpOnly\r\nLocation: /home\r\n",
+                "",
+            ),
+            "/home" if req.contains("session=abc") => reply("200 OK", "", "home"),
+            "/home" => reply("302 Found", "Location: /login\r\n", ""),
             _ => reply("401 Unauthorized", "", ""),
         });
         let base = format!("http://127.0.0.1:{port}");
-        let r = p.probe(&svc("Wiki", &format!("{base}/")), Mode::Http).await;
+        let view = async |path: &str| {
+            p.probe(&svc("S", &format!("{base}{path}")), Mode::Http)
+                .await
+        };
+        let r = view("/").await;
         assert!(r.ok, "a redirect still shows a server is there");
         assert_eq!(r.aredn, Some(aredn("http-status", Some(404))));
         // our own verdict doesn't follow redirects; the node's view does
-        let r = p
-            .probe(&svc("Moved", &format!("{base}/moved")), Mode::Http)
-            .await;
+        let r = view("/moved").await;
         assert!(r.ok && r.status == Some(302), "{:?}", r.status);
         assert_eq!(r.aredn, Some(aredn("http-status", Some(500))));
-        // and the node's view stops at a redirect off the mesh rather than follow it
-        let r = p
-            .probe(&svc("Away", &format!("{base}/away")), Mode::Http)
-            .await;
-        assert_eq!(r.aredn, Some(aredn("http-status", Some(302))));
-        let r = p
-            .probe(&svc("Secure", &format!("{base}/secure")), Mode::Http)
-            .await;
-        assert_eq!(r.aredn, Some(aredn("https-redirect", Some(301))));
-        let r = p
-            .probe(&svc("Admin", &format!("{base}/admin")), Mode::Http)
-            .await;
+        assert_eq!(
+            view("/login").await.aredn,
+            Some(aredn("http-ok", Some(200))),
+            "curl keeps cookies across redirects; without them this one loops"
+        );
+        assert_eq!(
+            view("/secure").await.aredn,
+            Some(aredn("https-redirect", Some(301)))
+        );
+        assert_eq!(
+            view("/choices").await.aredn,
+            Some(aredn("http-status", Some(300))),
+            "only 301, 302, 303, 307 and 308 count when they end on https"
+        );
+        assert_eq!(
+            view("/admin").await.aredn,
+            Some(aredn("http-ok", Some(401)))
+        );
+        // the node would follow a redirect off the mesh; this box doesn't, so it can't say
+        assert_eq!(view("/away").await.aredn, None);
+    }
+
+    #[tokio::test]
+    async fn the_node_view_stops_where_curl_stops() {
+        let p = local();
+        let port = http_server(|path, _| {
+            let hop = |to: &str| reply("302 Found", &format!("Location: {to}\r\n"), "");
+            match path {
+                "/ping" => hop("/pong"),
+                "/pong" => hop("/ping"),
+                p if p.starts_with("/https/") => reply(
+                    &format!("{} Moved", &p[7..]),
+                    "Location: https://10.9.9.9/\r\n",
+                    "",
+                ),
+                // /chain/<end>/<redirects>/<i>: that many redirects, then a page or https
+                p if p.starts_with("/chain/") => {
+                    let v: Vec<&str> = p.split('/').collect();
+                    let (len, i): (u32, u32) = (v[3].parse().unwrap(), v[4].parse().unwrap());
+                    match v[2] {
+                        _ if i < len => hop(&format!("/chain/{}/{len}/{}", v[2], i + 1)),
+                        "tls" => hop("https://10.9.9.9/"),
+                        _ => reply("200 OK", "", ""),
+                    }
+                }
+                _ => reply("404 Not Found", "", ""),
+            }
+        });
+        let base = format!("http://127.0.0.1:{port}");
+        let view = async |path: &str| {
+            p.probe(&svc("S", &format!("{base}{path}")), Mode::Http)
+                .await
+                .aredn
+        };
+        assert_eq!(
+            view("/ping").await,
+            Some(aredn("http-status", Some(302))),
+            "a loop ends on a redirect once curl gives up"
+        );
+        for code in [302, 303, 307, 308] {
+            assert_eq!(
+                view(&format!("/https/{code}")).await,
+                Some(aredn("https-redirect", Some(code)))
+            );
+        }
+        // curl's default --max-redirs is 50
+        assert_eq!(
+            view("/chain/ok/50/0").await,
+            Some(aredn("http-ok", Some(200)))
+        );
+        assert_eq!(
+            view("/chain/ok/51/0").await,
+            Some(aredn("http-status", Some(302)))
+        );
+        assert_eq!(
+            view("/chain/tls/49/0").await,
+            Some(aredn("https-redirect", Some(302)))
+        );
+        assert_eq!(
+            view("/chain/tls/50/0").await,
+            Some(aredn("http-status", Some(302))),
+            "past the cap curl doesn't follow it to https, so it ends on the redirect"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_node_view_keeps_cookies_to_the_host_that_set_them() {
+        let p = Prober::new(&ProbeCfg {
+            allow_hosts: vec!["127.0.0.1".into(), "localhost".into()],
+            timeout_s: 3,
+            ..Default::default()
+        })
+        .unwrap();
+        let port = http_server(|path, req| match path {
+            "/set" => {
+                let port = req
+                    .lines()
+                    .find(|l| l.to_ascii_lowercase().starts_with("host:"))
+                    .and_then(|l| l.rsplit(':').next())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                let to = format!("http://localhost:{port}/check");
+                reply(
+                    "302 Found",
+                    &format!("Set-Cookie: session=abc; Path=/\r\nLocation: {to}\r\n"),
+                    "",
+                )
+            }
+            "/check" if req.contains("session=abc") => reply("500 Leaked", "", ""),
+            "/check" => reply("200 OK", "", ""),
+            _ => reply("404 Not Found", "", ""),
+        });
+        let s = svc("S", &format!("http://127.0.0.1:{port}/set"));
+        assert_eq!(
+            p.probe(&s, Mode::Http).await.aredn,
+            Some(aredn("http-ok", Some(200))),
+            "a cookie from 127.0.0.1 isn't sent to localhost"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_node_asks_for_what_its_shell_leaves_of_the_link() {
+        let p = local();
+        let port = http_server(|path, _| match path {
+            "/cam?cmd=Snap&channel=0" => reply("200 OK", "", "jpeg"),
+            _ => reply("400 Bad Request", "", ""),
+        });
+        let s = svc(
+            "Cam",
+            &format!("http://127.0.0.1:{port}/cam?cmd=Snap&channel=0"),
+        );
+        let r = p.probe(&s, Mode::Http).await;
+        assert!(r.ok && r.status == Some(200), "{}", r.detail);
+        // sh -c ends the unquoted address at the &, so curl asks for /cam?cmd=Snap
+        assert_eq!(r.aredn, Some(aredn("http-status", Some(400))));
+    }
+
+    #[tokio::test]
+    async fn a_redirect_service_is_checked_at_the_address_it_leads_to() {
+        let p = local();
+        let port = http_server(|path, _| match path {
+            "/locked" => reply("401 Unauthorized", "", ""),
+            "/gone" => reply("404 Not Found", "", ""),
+            // the node's /a/redirect page itself, which neither check may stop at
+            _ => reply("502 Bad Gateway", "", ""),
+        });
+        let base = format!("http://127.0.0.1:{port}");
+        let probe = async |target: String| {
+            let link = format!("{base}/a/redirect?{target}");
+            p.probe(&svc("Cam", &link), Mode::Http).await
+        };
+        let r = probe(format!("{base}/locked")).await;
+        assert!(r.ok && r.status == Some(401), "{}", r.detail);
         assert_eq!(r.aredn, Some(aredn("http-ok", Some(401))));
+        let r = probe(format!("{base}/gone")).await;
+        assert_eq!(r.aredn, Some(aredn("http-status", Some(404))));
+        // the node's curl checks certificates, so an https target it can't verify fails
+        let (tls, _) = server(b"not a TLS server\r\n");
+        let r = probe(format!("https://127.0.0.1:{tls}/")).await;
+        assert_eq!(r.aredn, Some(aredn("https-untrusted", None)));
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let r = probe(format!("https://127.0.0.1:{closed}/")).await;
+        assert_eq!(r.aredn, Some(aredn("http-unreachable", None)));
+        // off the mesh this box only reaches the node's page, which says nothing of the target
+        let r = probe("http://192.168.1.1/".into()).await;
+        assert_eq!(r.aredn, None, "{}", r.detail);
+    }
+
+    #[test]
+    fn our_own_check_goes_where_people_go() {
+        let p = local();
+        assert_eq!(
+            p.own_url("http://tst-cam:8080/x"),
+            "http://tst-cam:8080/x",
+            "the link as advertised, so a bare name listed in allow_hosts still matches"
+        );
+        assert_eq!(
+            p.own_url("http://tst-node/a/redirect?http://127.0.0.1:81/cam"),
+            "http://127.0.0.1:81/cam"
+        );
+        let away = "http://tst-node/a/redirect?http://example.com/";
+        assert_eq!(
+            p.own_url(away),
+            away,
+            "off the mesh only the node's page is ours"
+        );
+    }
+
+    #[test]
+    fn the_node_fetches_bare_names_under_local_mesh_and_redirects_at_their_target() {
+        let u = |l: &str| node_url(l).map(String::from);
+        assert_eq!(
+            u("http://tst-cam:8080/snap?x=1").as_deref(),
+            Some("http://tst-cam.local.mesh:8080/snap?x=1")
+        );
+        assert_eq!(u("http://10.1.2.3/").as_deref(), Some("http://10.1.2.3/"));
+        assert_eq!(
+            u("http://tst-node:80/a/redirect?http://user:pw@tst-cam/snap.jpg").as_deref(),
+            Some("http://user:pw@tst-cam/snap.jpg"),
+            "a Redirect service's target is fetched as it stands"
+        );
+        assert_eq!(
+            u("http://tst-cam:8080/api.cgi?cmd=Snap&channel=0").as_deref(),
+            Some("http://tst-cam.local.mesh:8080/api.cgi?cmd=Snap"),
+            "the node's shell ends the unquoted address at the first &"
+        );
+        assert_eq!(
+            u("http://tst-node:80/a/redirect?http://10.1.2.3/x?a=1;b=2").as_deref(),
+            Some("http://10.1.2.3/x?a=1"),
+            "or ;"
+        );
+        assert_eq!(u("tcp://tst-cam:22/"), None);
     }
 
     #[tokio::test]
@@ -1241,7 +1595,7 @@ mod tests {
                 .is_ok()
         );
         // every way of connecting goes through the same rule
-        let port = http_server(|_| reply("200 OK", "", "hello"));
+        let port = http_server(|_, _| reply("200 OK", "", "hello"));
         let p = Prober::new(&ProbeCfg::default()).unwrap();
         let s = svc("Sneaky", &format!("http://localhost:{port}/"));
         let r = p.probe(&s, Mode::Http).await;
