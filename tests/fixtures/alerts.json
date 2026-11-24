@@ -1,0 +1,39 @@
+{
+  "alerts": [
+    {
+      "acked": false,
+      "key": "svc http://127.0.0.1:9271/svc/TST-HARBOR/Harbor_Camera DOWN",
+      "opened": 1795477677344,
+      "severity": "critical",
+      "text": "Not answering from any site (HTTP 503). tst-harbor: 1 good check in a row, 2 needed to change. (down since 2026-11-23 23:44 UTC)",
+      "title": "Harbor Camera on tst-harbor is down"
+    },
+    {
+      "acked": false,
+      "key": "svc http://127.0.0.1:9271/svc/TST-TOWER/Weather_Station DOWN",
+      "opened": 1795477677344,
+      "severity": "critical",
+      "text": "Not answering from any site (HTTP 503). (down since 2026-11-23 23:44 UTC)",
+      "title": "Weather Station on tst-tower is down"
+    },
+    {
+      "acked": false,
+      "key": "svc http://127.0.0.1:9271/svc/TST-CREEK/Creek_Camera PARTIAL",
+      "opened": 1795477617327,
+      "severity": "warning",
+      "text": "Answering from tst-creek, but not from tst-harbor, tst-shack (HTTP 504). The service is up; a link between those sites is the likely problem. (partial since 2026-11-23 23:44 UTC)",
+      "title": "Creek Camera on tst-creek is only partly reachable"
+    },
+    {
+      "acked": false,
+      "key": "svc http://127.0.0.1:9271/svc/TST-VALLEY/net_logger UNPUBLISHED-BUT-ALIVE",
+      "opened": 1795477497301,
+      "severity": "info",
+      "text": "Missing from the mesh service list, but still answering. AREDN's own reachability check may have unpublished it by mistake. (up for 4 min) It answers HTTP 404, but AREDN's check only accepts 200 or 401, so the node stops listing it once it has failed for 2.5 hours, even though a server is there. Point the advertised link at a page that returns 200, such as the app's front page. (seen from tst-harbor)",
+      "title": "net_logger on tst-valley was dropped from the mesh list but still works"
+    }
+  ],
+  "cut_off": [],
+  "generated": 1795477678129,
+  "lapsed": []
+}

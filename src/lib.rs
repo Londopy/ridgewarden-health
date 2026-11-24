@@ -12,6 +12,7 @@ pub mod health;
 pub mod heartbeat;
 pub mod probe;
 pub mod probes;
+pub mod top;
 pub mod web;
 
 use std::sync::Arc;

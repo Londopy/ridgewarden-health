@@ -1,0 +1,452 @@
+{
+  "generated": 1795477678092,
+  "services": [
+    {
+      "aredn": null,
+      "class": "DOWN",
+      "heartbeat": false,
+      "held": null,
+      "host": "tst-harbor",
+      "host_label": "tst-harbor",
+      "link": "http://127.0.0.1:9271/svc/TST-HARBOR/Harbor_Camera",
+      "name": "Harbor Camera",
+      "reason": "Not answering from any site (HTTP 503). tst-harbor: 1 good check in a row, 2 needed to change.",
+      "since": 1795477481473,
+      "since_open": false,
+      "uptime": {
+        "day": 30.0,
+        "month": 30.0,
+        "year": 30.0
+      },
+      "vantages": [
+        {
+          "aredn": {
+            "code": "http-ok",
+            "pass": true,
+            "status": 200
+          },
+          "check": "http",
+          "detail": "HTTP 200",
+          "label": "tst-harbor",
+          "ms": 0.8,
+          "ok": false,
+          "pending": 1,
+          "ts": 1795477666833,
+          "vantage": "tst-harbor"
+        },
+        {
+          "aredn": {
+            "code": "http-status",
+            "pass": false,
+            "status": 503
+          },
+          "check": "http",
+          "detail": "HTTP 503",
+          "label": "tst-shack",
+          "ms": null,
+          "ok": false,
+          "pending": 0,
+          "ts": 1795477645697,
+          "vantage": "tst-shack"
+        }
+      ]
+    },
+    {
+      "aredn": null,
+      "class": "DOWN",
+      "heartbeat": false,
+      "held": null,
+      "host": "tst-tower",
+      "host_label": "tst-tower",
+      "link": "http://127.0.0.1:9271/svc/TST-TOWER/Weather_Station",
+      "name": "Weather Station",
+      "reason": "Not answering from any site (HTTP 503).",
+      "since": 1795477481473,
+      "since_open": false,
+      "uptime": {
+        "day": 20.0,
+        "month": 20.0,
+        "year": 20.0
+      },
+      "vantages": [
+        {
+          "aredn": {
+            "code": "http-status",
+            "pass": false,
+            "status": 503
+          },
+          "check": "http",
+          "detail": "HTTP 503",
+          "label": "tst-harbor",
+          "ms": null,
+          "ok": false,
+          "pending": 0,
+          "ts": 1795477666833,
+          "vantage": "tst-harbor"
+        },
+        {
+          "aredn": {
+            "code": "http-status",
+            "pass": false,
+            "status": 503
+          },
+          "check": "http",
+          "detail": "HTTP 503",
+          "label": "tst-shack",
+          "ms": null,
+          "ok": false,
+          "pending": 0,
+          "ts": 1795477645697,
+          "vantage": "tst-shack"
+        }
+      ]
+    },
+    {
+      "aredn": null,
+      "class": "PARTIAL",
+      "heartbeat": false,
+      "held": null,
+      "host": "tst-creek",
+      "host_label": "tst-creek",
+      "link": "http://127.0.0.1:9271/svc/TST-CREEK/Creek_Camera",
+      "name": "Creek Camera",
+      "reason": "Answering from tst-creek, but not from tst-harbor, tst-shack (HTTP 504). The service is up; a link between those sites is the likely problem.",
+      "since": 1795477477384,
+      "since_open": false,
+      "uptime": {
+        "day": 42.857142857142854,
+        "month": 42.857142857142854,
+        "year": 42.857142857142854
+      },
+      "vantages": [
+        {
+          "aredn": {
+            "code": "http-ok",
+            "pass": true,
+            "status": 200
+          },
+          "check": "http",
+          "detail": "HTTP 200",
+          "label": "tst-creek",
+          "ms": 0.8,
+          "ok": true,
+          "pending": 0,
+          "ts": 1795477661793,
+          "vantage": "tst-creek"
+        },
+        {
+          "aredn": {
+            "code": "http-status",
+            "pass": false,
+            "status": 504
+          },
+          "check": "http",
+          "detail": "HTTP 504",
+          "label": "tst-harbor",
+          "ms": null,
+          "ok": false,
+          "pending": 0,
+          "ts": 1795477666833,
+          "vantage": "tst-harbor"
+        },
+        {
+          "aredn": {
+            "code": "http-status",
+            "pass": false,
+            "status": 504
+          },
+          "check": "http",
+          "detail": "HTTP 504",
+          "label": "tst-shack",
+          "ms": null,
+          "ok": false,
+          "pending": 0,
+          "ts": 1795477645697,
+          "vantage": "tst-shack"
+        }
+      ]
+    },
+    {
+      "aredn": "It answers HTTP 404, but AREDN's check only accepts 200 or 401, so the node stops listing it once it has failed for 2.5 hours, even though a server is there. Point the advertised link at a page that returns 200, such as the app's front page. (seen from tst-harbor)",
+      "class": "UNPUBLISHED-BUT-ALIVE",
+      "heartbeat": false,
+      "held": null,
+      "host": "tst-valley",
+      "host_label": "tst-valley",
+      "link": "http://127.0.0.1:9271/svc/TST-VALLEY/net_logger",
+      "name": "net_logger",
+      "reason": "Missing from the mesh service list, but still answering. AREDN's own reachability check may have unpublished it by mistake.",
+      "since": 1795477422310,
+      "since_open": false,
+      "uptime": {
+        "day": 100.0,
+        "month": 100.0,
+        "year": 100.0
+      },
+      "vantages": [
+        {
+          "aredn": {
+            "code": "http-status",
+            "pass": false,
+            "status": 404
+          },
+          "check": "http",
+          "detail": "HTTP 404",
+          "label": "tst-harbor",
+          "ms": 0.6,
+          "ok": true,
+          "pending": 0,
+          "ts": 1795477666833,
+          "vantage": "tst-harbor"
+        },
+        {
+          "aredn": {
+            "code": "http-status",
+            "pass": false,
+            "status": 404
+          },
+          "check": "http",
+          "detail": "HTTP 404",
+          "label": "tst-shack",
+          "ms": 1.1,
+          "ok": true,
+          "pending": 0,
+          "ts": 1795477645697,
+          "vantage": "tst-shack"
+        }
+      ]
+    },
+    {
+      "aredn": null,
+      "class": "UP",
+      "heartbeat": false,
+      "held": null,
+      "host": "tst-shack",
+      "host_label": "tst-shack",
+      "link": "http://127.0.0.1:9271/svc/TST-SHACK/Mesh_Chat",
+      "name": "Mesh Chat",
+      "reason": "Answering from tst-harbor, tst-shack.",
+      "since": 1795477422433,
+      "since_open": false,
+      "uptime": {
+        "day": 100.0,
+        "month": 100.0,
+        "year": 100.0
+      },
+      "vantages": [
+        {
+          "aredn": {
+            "code": "http-ok",
+            "pass": true,
+            "status": 200
+          },
+          "check": "http",
+          "detail": "HTTP 200",
+          "label": "tst-harbor",
+          "ms": 0.7,
+          "ok": true,
+          "pending": 0,
+          "ts": 1795477666833,
+          "vantage": "tst-harbor"
+        },
+        {
+          "aredn": {
+            "code": "http-ok",
+            "pass": true,
+            "status": 200
+          },
+          "check": "http",
+          "detail": "HTTP 200",
+          "label": "tst-shack",
+          "ms": 1.0,
+          "ok": true,
+          "pending": 0,
+          "ts": 1795477645697,
+          "vantage": "tst-shack"
+        }
+      ]
+    },
+    {
+      "aredn": null,
+      "class": "UP",
+      "heartbeat": true,
+      "held": null,
+      "host": "tst-shack",
+      "host_label": "tst-shack",
+      "link": "push://tst-shack/nightly-backup",
+      "name": "Nightly backup",
+      "reason": "Checking in at tst-shack: last beat 3 min ago: copied 42 files.",
+      "since": 1795477467313,
+      "since_open": false,
+      "uptime": {
+        "day": 100.0,
+        "month": 100.0,
+        "year": 100.0
+      },
+      "vantages": [
+        {
+          "aredn": null,
+          "check": "push",
+          "detail": "last beat 3 min ago: copied 42 files",
+          "label": "tst-shack",
+          "ms": null,
+          "ok": true,
+          "pending": 0,
+          "ts": 1795477647376,
+          "vantage": "tst-shack"
+        }
+      ]
+    },
+    {
+      "aredn": null,
+      "class": "UP",
+      "heartbeat": false,
+      "held": null,
+      "host": "tst-shack",
+      "host_label": "tst-shack",
+      "link": "http://127.0.0.1:9271/svc/TST-SHACK/Offline_Map",
+      "name": "Offline Map",
+      "reason": "Answering from tst-harbor, tst-shack.",
+      "since": 1795477422433,
+      "since_open": false,
+      "uptime": {
+        "day": 100.0,
+        "month": 100.0,
+        "year": 100.0
+      },
+      "vantages": [
+        {
+          "aredn": {
+            "code": "http-ok",
+            "pass": true,
+            "status": 200
+          },
+          "check": "http",
+          "detail": "HTTP 200",
+          "label": "tst-harbor",
+          "ms": 1.0,
+          "ok": true,
+          "pending": 0,
+          "ts": 1795477666833,
+          "vantage": "tst-harbor"
+        },
+        {
+          "aredn": {
+            "code": "http-ok",
+            "pass": true,
+            "status": 200
+          },
+          "check": "http",
+          "detail": "HTTP 200",
+          "label": "tst-shack",
+          "ms": 1.3,
+          "ok": true,
+          "pending": 0,
+          "ts": 1795477645697,
+          "vantage": "tst-shack"
+        }
+      ]
+    },
+    {
+      "aredn": null,
+      "class": "UP",
+      "heartbeat": false,
+      "held": null,
+      "host": "tst-valley",
+      "host_label": "tst-valley",
+      "link": "http://127.0.0.1:9271/svc/TST-VALLEY/Wiki",
+      "name": "Wiki",
+      "reason": "Answering from tst-harbor, tst-shack.",
+      "since": 1795477422433,
+      "since_open": false,
+      "uptime": {
+        "day": 100.0,
+        "month": 100.0,
+        "year": 100.0
+      },
+      "vantages": [
+        {
+          "aredn": {
+            "code": "http-ok",
+            "pass": true,
+            "status": 200
+          },
+          "check": "http",
+          "detail": "HTTP 200",
+          "label": "tst-harbor",
+          "ms": 0.6,
+          "ok": true,
+          "pending": 0,
+          "ts": 1795477666833,
+          "vantage": "tst-harbor"
+        },
+        {
+          "aredn": {
+            "code": "http-ok",
+            "pass": true,
+            "status": 200
+          },
+          "check": "http",
+          "detail": "HTTP 200",
+          "label": "tst-shack",
+          "ms": 1.0,
+          "ok": true,
+          "pending": 0,
+          "ts": 1795477645697,
+          "vantage": "tst-shack"
+        }
+      ]
+    },
+    {
+      "aredn": null,
+      "class": "UP",
+      "heartbeat": false,
+      "held": null,
+      "host": "tst-summit",
+      "host_label": "tst-summit",
+      "link": "http://127.0.0.1:9271/svc/TST-SUMMIT/Winlink_Gateway",
+      "name": "Winlink Gateway",
+      "reason": "Answering from tst-harbor, tst-shack.",
+      "since": 1795477422433,
+      "since_open": false,
+      "uptime": {
+        "day": 100.0,
+        "month": 100.0,
+        "year": 100.0
+      },
+      "vantages": [
+        {
+          "aredn": {
+            "code": "http-ok",
+            "pass": true,
+            "status": 200
+          },
+          "check": "http",
+          "detail": "HTTP 200",
+          "label": "tst-harbor",
+          "ms": 0.8,
+          "ok": true,
+          "pending": 0,
+          "ts": 1795477666833,
+          "vantage": "tst-harbor"
+        },
+        {
+          "aredn": {
+            "code": "http-ok",
+            "pass": true,
+            "status": 200
+          },
+          "check": "http",
+          "detail": "HTTP 200",
+          "label": "tst-shack",
+          "ms": 0.7,
+          "ok": true,
+          "pending": 0,
+          "ts": 1795477645697,
+          "vantage": "tst-shack"
+        }
+      ]
+    }
+  ],
+  "site": "tst-shack"
+}

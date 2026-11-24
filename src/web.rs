@@ -4,6 +4,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::time::Duration;
 
 use std::net::SocketAddr;
 
@@ -35,6 +36,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/ack/{token}", get(ack_page).post(ack_post))
         .route("/push/{token}", post(push))
         .route("/api/services", get(services_json))
+        .route("/api/alerts", get(alerts_json))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(app)
 }
@@ -76,7 +78,7 @@ fn enc(s: &str) -> String {
     o
 }
 
-fn plural(n: usize, one: &str, many: &str) -> String {
+pub fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
@@ -295,7 +297,7 @@ async fn services_page(State(app): State<Arc<App>>) -> Result<Html<String>, Fail
     Ok(page(&app, "/", "Services", &b, true).await)
 }
 
-fn check_words(kind: &str) -> &'static str {
+pub fn check_words(kind: &str) -> &'static str {
     match kind {
         "http" => "an HTTP request",
         "tcp" => "a TCP connection",
@@ -588,24 +590,59 @@ async fn push(
 
 async fn services_json(State(app): State<Arc<App>>) -> Result<Json<Value>, Fail> {
     let now = now_ms();
+    // this site's node, which the app keeps once the core has told it, so null only until
+    // then; a core that hangs mustn't hold the list up
+    let site = tokio::time::timeout(Duration::from_secs(2), app.vantage())
+        .await
+        .ok()
+        .and_then(Result::ok);
     let views = classify(&app.db(), now, &Rules::from_cfg(&app.cfg))?;
     let mut out = vec![];
     for s in &views {
         let up = uptime(&app.db(), &s.svc.link, now)?;
+        // labels are the [site_names] the pages show in place of node names
         out.push(json!({
-            "name": s.svc.name, "host": s.svc.host, "link": s.svc.link,
-            "heartbeat": s.is_heartbeat(),
-            "class": s.class.label(), "since": s.since, "reason": s.reason,
-            "aredn": aredn_view(s), "held": held(&app, s, now),
+            "name": s.svc.name, "host": s.svc.host, "host_label": app.cfg.label(&s.svc.host),
+            "link": s.svc.link, "heartbeat": s.is_heartbeat(),
+            "class": s.class.label(), "since": s.since, "since_open": s.since_open,
+            "reason": s.reason, "aredn": aredn_view(s), "held": held(&app, s, now),
             "uptime": {"day": up.day, "month": up.month, "year": up.year},
             "vantages": s.vantages.iter().map(|v| json!({
-                "vantage": v.vantage, "ok": v.ok, "ms": v.ms, "detail": v.detail, "ts": v.ts,
-                "pending": v.pending, "check": v.check,
+                "vantage": v.vantage, "label": app.cfg.label(&v.vantage), "ok": v.ok, "ms": v.ms,
+                "detail": v.detail, "ts": v.ts, "pending": v.pending, "check": v.check,
                 "aredn": v.aredn.as_ref().map(|a| json!({"pass": a.pass, "code": a.code, "status": a.status})),
             })).collect::<Vec<_>>(),
         }));
     }
-    Ok(Json(json!({"generated": now, "services": out})))
+    Ok(Json(
+        json!({"generated": now, "site": site, "services": out}),
+    ))
+}
+
+/// What the services page shows above the list: sites that look cut off, silences past
+/// their review date, and the open alerts.
+async fn alerts_json(State(app): State<Arc<App>>) -> Result<Json<Value>, Fail> {
+    let now = now_ms();
+    let cut: Vec<Value> = cut_off_sites(&app.db(), now, app.fresh_ms())?
+        .into_iter()
+        .map(|site| json!({"label": app.cfg.label(&site), "site": site}))
+        .collect();
+    let lapsed: Vec<Value> = app
+        .cfg
+        .alerts
+        .lapsed(now)
+        .map(|x| json!({"matches": x.matches, "reason": x.reason, "review": x.review}))
+        .collect();
+    let open: Vec<Value> = alerts::open_alerts(&app.db())?
+        .into_iter()
+        .map(|a| {
+            json!({"key": a.key, "severity": a.severity, "title": a.title, "text": a.text,
+                   "opened": a.opened_ms, "acked": a.acked})
+        })
+        .collect();
+    Ok(Json(json!({
+        "generated": now, "cut_off": cut, "lapsed": lapsed, "alerts": open,
+    })))
 }
 
 #[cfg(test)]
@@ -628,6 +665,8 @@ mod tests {
             ntfy: Some("http://10.1.1.1/c".into()),
             ..Default::default()
         }];
+        // set, so a page or API that leaked acknowledge links would show one
+        cfg.alerts.public_url = Some("http://n0call-pi.local.mesh:8791".into());
         cfg.validate().unwrap();
         Arc::new(App::new(cfg).unwrap())
     }
@@ -733,6 +772,47 @@ mod tests {
         assert_eq!(
             enc("http://a:80/x?y=1&z"),
             "http%3A%2F%2Fa%3A80%2Fx%3Fy%3D1%26z"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_alerts_api_lists_open_alerts_without_their_acknowledge_links() {
+        use ridgewarden_client::alerts::{Alert, Severity, ack_token, update};
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(dir.path());
+        let a = Alert {
+            key: "svc http://cam/ DOWN".into(),
+            severity: Severity::Critical,
+            title: "Camera on tst-harbor is down".into(),
+            text: "Not answering from any site (timed out).".into(),
+        };
+        update(&app.db(), std::slice::from_ref(&a), &|_| false, 1000).unwrap();
+        let Json(v) = alerts_json(State(app.clone())).await.ok().unwrap();
+        let open = &v["alerts"][0];
+        assert_eq!(open["title"], "Camera on tst-harbor is down");
+        assert_eq!(open["severity"], "critical");
+        assert_eq!(
+            (&open["opened"], &open["acked"]),
+            (&json!(1000), &json!(false))
+        );
+        assert_eq!(v["cut_off"], json!([]));
+        let mut fields: Vec<&str> = open
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        fields.sort();
+        assert_eq!(
+            fields,
+            ["acked", "key", "opened", "severity", "text", "title"],
+            "these fields and no others, so no acknowledge link"
+        );
+        let token = ack_token(&app.db(), &a.key, 1000).unwrap();
+        let all = v.to_string();
+        assert!(
+            !all.contains(&token) && !all.contains("/ack/"),
+            "anyone can read this API: {all}"
         );
     }
 }

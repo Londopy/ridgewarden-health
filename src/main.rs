@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -9,7 +10,7 @@ use ridgewarden_health::app::App;
 use ridgewarden_health::config::{Config, EXAMPLE};
 use ridgewarden_health::health::{NodeCheck, aredn_text};
 use ridgewarden_health::probe::{Mode, Prober, allowed_host, host_port, mode_for};
-use ridgewarden_health::{heartbeat, spawn_loops, web};
+use ridgewarden_health::{heartbeat, spawn_loops, top, web};
 
 #[derive(Parser)]
 #[command(
@@ -44,16 +45,28 @@ enum Cmd {
     },
     /// Print each heartbeat's push URL
     Heartbeats,
+    /// Watch the services and open alerts live in the terminal
+    Top {
+        /// where the running app answers
+        #[arg(long, default_value = "http://127.0.0.1:8791")]
+        url: String,
+        /// seconds between reads
+        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=600))]
+        every: u64,
+    },
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "ridgewarden_health=info,ridgewarden_client=info".into()),
-        )
-        .init();
     let cli = Cli::parse();
+    // top draws the whole terminal, so a log line would land in the middle of it
+    if !matches!(cli.cmd, Cmd::Top { .. }) {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "ridgewarden_health=info,ridgewarden_client=info".into()),
+            )
+            .init();
+    }
     match cli.cmd {
         Cmd::Init => {
             if cli.config.exists() {
@@ -78,6 +91,7 @@ fn main() -> Result<()> {
             tokio::runtime::Runtime::new()?.block_on(check(cfg, link, name))
         }
         Cmd::Heartbeats => heartbeats(&Config::load(&cli.config)?),
+        Cmd::Top { url, every } => top::run(&url, Duration::from_secs(every)),
     }
 }
 
