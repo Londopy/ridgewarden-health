@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
+use serde::Deserialize;
 
 use ridgewarden_client::alerts::{Alert, Severity};
 use ridgewarden_client::aredn::Service;
@@ -55,6 +56,21 @@ pub enum Class {
 }
 
 impl Class {
+    const ALL: [Class; 7] = [
+        Class::Down,
+        Class::Partial,
+        Class::Stale,
+        Class::UnpublishedAlive,
+        Class::Unknown,
+        Class::Unpublished,
+        Class::Up,
+    ];
+
+    /// The state with this label, as the JSON API gives it.
+    pub fn from_label(label: &str) -> Option<Class> {
+        Self::ALL.into_iter().find(|c| c.label() == label)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Class::Up => "UP",
@@ -82,7 +98,7 @@ impl Class {
 }
 
 /// What the AREDN node's own check would make of a service, from one site's probe.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct NodeCheck {
     pub pass: bool,
     pub code: String,
@@ -94,7 +110,10 @@ pub struct VantageResult {
     pub vantage: String,
     pub ok: bool,
     pub ms: Option<f64>,
+    /// what the latest check said
     pub detail: String,
+    /// what the latest check that agrees with the verdict said, which is what explains it
+    pub why: String,
     pub status: Option<u16>,
     pub ts: i64,
     /// when the streak that set this site's current verdict began
@@ -263,12 +282,12 @@ fn beat_class(
         Some(v) if v.ok => (
             Class::Up,
             Some(v.run_start),
-            format!("Checking in at {}: {}.", svc.host, v.detail),
+            format!("Checking in at {}: {}.", svc.host, v.why),
         ),
         Some(v) if ever_answered(conn, &svc.link)? => (
             Class::Down,
             Some(v.run_start),
-            format!("At {}: {}.", svc.host, v.detail),
+            format!("At {}: {}.", svc.host, v.why),
         ),
         Some(_) => (
             Class::Stale,
@@ -326,7 +345,7 @@ fn judge(
                  those sites is the likely problem.",
                 names(&up),
                 names(&down),
-                down[0].detail
+                down[0].why
             ),
         )
     } else if !ever_answered(conn, &svc.link)? {
@@ -336,14 +355,14 @@ fn judge(
             format!(
                 "Advertised but has never passed a check ({}). Probably a leftover advert, or \
                  a service that needs a different kind of check (probe.override).",
-                down[0].detail
+                down[0].why
             ),
         )
     } else {
         (
             Class::Down,
             down.iter().map(|v| v.run_start).max(),
-            format!("Not answering from any site ({}).", down[0].detail),
+            format!("Not answering from any site ({}).", down[0].why),
         )
     })
 }
@@ -400,6 +419,8 @@ pub fn classify(conn: &Connection, now: i64, rules: &Rules) -> Result<Vec<Servic
                 continue; // this vantage stopped probing; its old answer says nothing now
             }
             let (ok, run_start, pending) = settle(rs, fail_after, ok_after);
+            // the latest `pending` results disagree with the verdict; the one before them set it
+            let why = rs[rs.len() - 1 - pending as usize].3.clone();
             let (check, aredn) = checks
                 .get(&(link.clone(), v.clone()))
                 .cloned()
@@ -409,6 +430,7 @@ pub fn classify(conn: &Connection, now: i64, rules: &Rules) -> Result<Vec<Servic
                 ok,
                 ms: last.2,
                 detail: last.3.clone(),
+                why,
                 status: last.4,
                 ts: last.0,
                 run_start,
@@ -537,7 +559,7 @@ pub fn cut_off_sites(conn: &Connection, now: i64, fresh_ms: i64) -> Result<Vec<S
 }
 
 /// Share of checks that worked, from every site, as percentages.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize)]
 pub struct Uptime {
     pub day: Option<f64>,
     pub month: Option<f64>,
@@ -690,8 +712,10 @@ pub fn aredn_view(v: &ServiceView) -> Option<String> {
     if v.is_heartbeat() {
         return None;
     }
-    // the node's verdict on a service that answers nowhere says nothing new
-    let working = v.vantages.iter().filter(|x| x.ok);
+    // the node's verdict on a service that answers nowhere says nothing new. Only a site's
+    // latest check has its AREDN verdict kept, so a site counts only while that check agrees
+    // with its own verdict.
+    let working = v.vantages.iter().filter(|x| x.ok && x.pending == 0);
     let failing = working
         .clone()
         .find_map(|x| x.aredn.as_ref().filter(|a| !a.pass).map(|a| (x, a)));
@@ -924,6 +948,47 @@ mod tests {
     }
 
     #[test]
+    fn a_recovering_service_is_explained_by_the_failures_not_the_good_check() {
+        let mut l = log();
+        advertise(
+            &mut l,
+            NOW - 2 * MIN,
+            &[("Down", "http://down/"), ("Partial", "http://partial/")],
+        );
+        for (i, ok) in [true, false, false, false, true].into_iter().enumerate() {
+            let ts = NOW - (50 - 10 * i as i64) * MIN;
+            probe(
+                &mut l,
+                ts,
+                "a",
+                &[("http://down/", ok), ("http://partial/", true)],
+            );
+            probe(&mut l, ts, "b", &[("http://partial/", ok)]);
+        }
+        let views = classify(&l.conn, NOW, &RULES).unwrap();
+        let get = |link: &str| views.iter().find(|v| v.svc.link == link).unwrap();
+        let down = get("http://down/");
+        assert_eq!(down.class, Class::Down);
+        assert_eq!(
+            down.reason,
+            "Not answering from any site (timed out). a: 1 good check in a row, 2 needed to change."
+        );
+        assert_eq!(
+            down.vantages[0].detail, "HTTP 200",
+            "the site's own row still shows its latest check"
+        );
+        let partial = get("http://partial/");
+        assert_eq!(partial.class, Class::Partial);
+        assert!(
+            partial
+                .reason
+                .starts_with("Answering from a, but not from b (timed out)."),
+            "{}",
+            partial.reason
+        );
+    }
+
+    #[test]
     fn a_cut_off_site_gives_no_verdict() {
         let mut l = log();
         advertise(
@@ -1052,6 +1117,72 @@ mod tests {
         let why = aredn_view(get("Nas")).unwrap();
         assert!(why.contains("certificate"), "{why}");
         assert_eq!(get("Wiki").vantages[0].check, "http");
+    }
+
+    #[test]
+    fn a_cut_off_round_says_nothing_about_aredns_verdict() {
+        let mut l = log();
+        advertise(&mut l, NOW - 2 * MIN, &[("Cam", "http://cam/")]);
+        let passes = json!({"pass": true, "code": "http-ok", "status": 200});
+        report(
+            &mut l,
+            "svc.probe",
+            json!({"vantage": "a", "results": [checked("http://cam/", true, passes)]}),
+            NOW - 10 * MIN,
+        );
+        let unreachable = json!({"pass": false, "code": "http-unreachable"});
+        report(
+            &mut l,
+            "svc.probe",
+            json!({"vantage": "a", "cut_off": true,
+                   "results": [checked("http://cam/", false, unreachable)]}),
+            NOW - MIN,
+        );
+        let views = classify(&l.conn, NOW, &RULES).unwrap();
+        assert_eq!(views[0].class, Class::Up, "{}", views[0].reason);
+        assert_eq!(
+            aredn_view(&views[0]),
+            None,
+            "a round where a cut-off site reached nothing is left out of the node's verdict too"
+        );
+    }
+
+    #[test]
+    fn aredns_verdict_comes_from_a_check_that_agrees_with_the_sites_own() {
+        let mut l = log();
+        advertise(&mut l, NOW - 2 * MIN, &[("Cam", "http://cam/")]);
+        let passes = json!({"pass": true, "code": "http-ok", "status": 200});
+        let fails = |status| json!({"pass": false, "code": "http-status", "status": status});
+        let checks = [(true, passes.clone()), (true, passes), (false, fails(504))];
+        for (i, (ok, aredn)) in checks.into_iter().enumerate() {
+            report(
+                &mut l,
+                "svc.probe",
+                json!({"vantage": "a", "results": [checked("http://cam/", ok, aredn)]}),
+                NOW - (30 - 10 * i as i64) * MIN,
+            );
+        }
+        let views = classify(&l.conn, NOW, &RULES).unwrap();
+        assert_eq!(
+            (views[0].class, views[0].vantages[0].pending),
+            (Class::Up, 1)
+        );
+        assert_eq!(
+            aredn_view(&views[0]),
+            None,
+            "a still answers by its verdict, and its failed check since says nothing about why \
+             AREDN would drop a working service"
+        );
+        // its latest check agrees with its verdict again, so that check's AREDN verdict counts
+        report(
+            &mut l,
+            "svc.probe",
+            json!({"vantage": "a", "results": [checked("http://cam/", true, fails(404))]}),
+            NOW - MIN,
+        );
+        let views = classify(&l.conn, NOW, &RULES).unwrap();
+        let why = aredn_view(&views[0]).unwrap();
+        assert!(why.starts_with("It answers HTTP 404"), "{why}");
     }
 
     #[test]

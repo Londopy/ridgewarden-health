@@ -145,6 +145,11 @@ impl Projection for Probes {
                     cut_off,
                 ],
             )?;
+            // a cut-off round is left out of the verdicts, so its checks mustn't stand in for
+            // the latest ones either
+            if cut_off {
+                continue;
+            }
             let check =
                 known(s(r, "check"), &checks).unwrap_or(if beats { "push" } else { "http" });
             let a = r.get("aredn");
